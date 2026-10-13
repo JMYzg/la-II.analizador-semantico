@@ -10,167 +10,161 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Error 13: llamada incorrecta a un método. C no tiene clases; lo que hace el papel de un
+ * método es un miembro de un struct que es puntero a función, por ejemplo
+ * "struct Calculadora { int (*sumar)(int, int); };", que se llama con calc.sumar(1, 2)
+ * o con p->sumar(1, 2).
+ *
+ * Primero busca los structs ("struct Nombre { ... }", "typedef struct { ... } Alias" y
+ * "typedef struct Nombre Alias;") y la firma de cada miembro puntero a función. Después
+ * revisa cada llamada variable.miembro(...) o variable->miembro(...) sobre una variable de
+ * esos structs que esté al alcance, y reporta un error si:
+ * - la cantidad de argumentos no es la de parámetros (con "..." acepta más), o
+ * - un argumento literal no es compatible con su parámetro: una cadena donde se espera un
+ *   número, o un número donde se espera un puntero (salvo 0, el puntero nulo).
+ *
+ * Solo compara el tipo de los literales: si el argumento es una variable o una expresión
+ * no conoce su tipo y lo da por bueno. Llamar a un miembro que no existe es el error 12.
+ */
 public class ErrorLlamadaMetodo {
+
     private enum TipoParametro { ENTERO, REAL, TEXTO, PUNTERO, DESCONOCIDO }
 
-    private record Parametro(TipoParametro tipo, boolean tieneDefecto) {}
-
-    private record Metodo(String nombre, List<Parametro> parametros, boolean variable) {
-        int minimo() {
-            return (int) parametros.stream().filter(p -> !p.tieneDefecto()).count();
-        }
-
-        int maximo() {
-            return parametros.size();
-        }
-
+    /** Los parámetros de un puntero a función; variable indica que termina en "...". */
+    private record Firma(List<TipoParametro> parametros, boolean variable) {
         boolean aceptaCantidad(int cantidad) {
-            return cantidad >= minimo() && (variable || cantidad <= maximo());
+            return variable ? cantidad >= parametros.size() : cantidad == parametros.size();
+        }
+
+        String esperados() {
+            return (variable ? "al menos " : "") + parametros.size();
         }
     }
 
+    private static final Set<String> TIPOS_ENTEROS = Set.of(
+            "int", "short", "long", "char", "unsigned", "signed", "_Bool", "bool", "size_t");
+
     private List<Token> tokens;
     private List<ErrorSemantico> errores;
-    private Map<String, List<Metodo>> clases;
-    private Map<String, String> objetos;
+
+    // Nombre del struct o de su typedef -> sus miembros puntero a función, por nombre.
+    private Map<String, Map<String, Firma>> structs;
+
+    // Variables al alcance: nombre -> tipo como se escribió ("struct Calculadora" o "Consola").
+    // Hay un mapa por cada bloque { } abierto; el último es el más interno.
+    private List<Map<String, String>> alcances;
+
+    // Variables declaradas entre paréntesis (parámetros de una función o el encabezado de un
+    // for): pasan al bloque que se abre justo después.
+    private Map<String, String> pendientes;
 
     public List<ErrorSemantico> analizar(List<Token> tokens) {
         this.tokens = tokens;
         this.errores = new ArrayList<>();
-        this.clases = new HashMap<>();
-        this.objetos = new HashMap<>();
+        this.structs = new HashMap<>();
 
-        buscarClases();
-        if (!clases.isEmpty()) {
+        buscarStructs();
+        if (!structs.isEmpty()) {
             revisarLlamadas();
         }
         return errores;
     }
 
-        private void buscarClases() {
-        for (int i = 0; i + 1 < tokens.size(); i++) {
-            if (!esInicioDeClase(i) || tokens.get(i + 1).tipo() != TipoToken.IDENTIFICADOR) continue;
+    // ---------------------------------------------------------------- structs y sus firmas
 
-            String nombre = tokens.get(i + 1).lexema();
-            int llave = buscarLlaveDeClase(i + 2);
-            if (llave < 0) continue;
+    private void buscarStructs() {
+        Map<String, String> alias = new HashMap<>();
 
-            int cierre = cerrarLlave(llave);
-            clases.computeIfAbsent(nombre, k -> new ArrayList<>())
-                    .addAll(metodosDe(nombre, llave + 1, cierre));
-        }
-    }
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!esPalabra(i, "struct")) continue;
 
-    private boolean esInicioDeClase(int i) {
-        Token token = tokens.get(i);
-        boolean palabra = token.tipo() == TipoToken.IDENTIFICADOR || token.tipo() == TipoToken.PALABRA_RESERVADA;
-        return palabra && (token.lexema().equals("class") || token.lexema().equals("struct"));
-    }
+            boolean conTypedef = esPalabra(i - 1, "typedef");
+            int j = i + 1;
+            String nombre = null;
+            if (esIdentificador(j)) {
+                nombre = tokens.get(j).lexema();
+                j++;
+            }
 
-        private int buscarLlaveDeClase(int i) {
-        for (int j = i; j < tokens.size(); j++) {
-            if (esSimbolo(j, "{")) return j;
-            if (esSimbolo(j, ";") || esSimbolo(j, "(") || esSimbolo(j, ")")
-                    || esSimbolo(j, "}") || esOperador(j, "=")) {
-                return -1;
+            if (esSimbolo(j, "{")) {
+                int cierre = cerrar(j, "{", "}");
+                Map<String, Firma> miembros = miembrosDe(j + 1, cierre);
+                if (nombre != null) structs.put(nombre, miembros);
+                if (conTypedef) {
+                    for (String nombreAlias : declaradores(cierre + 1)) {
+                        structs.put(nombreAlias, miembros);
+                    }
+                }
+            } else if (conTypedef && nombre != null) {
+                // typedef struct Nombre Alias; (el struct puede estar definido antes o después)
+                for (String nombreAlias : declaradores(j)) {
+                    alias.put(nombreAlias, nombre);
+                }
             }
         }
-        return -1;
+
+        alias.forEach((nombreAlias, nombre) -> {
+            if (structs.containsKey(nombre)) structs.put(nombreAlias, structs.get(nombre));
+        });
     }
 
-        private List<Metodo> metodosDe(String clase, int desde, int hasta) {
-        List<Metodo> metodos = new ArrayList<>();
+    /** Los nombres declarados desde i hasta el ";", como Alias y PAlias en "} Alias, *PAlias;". */
+    private List<String> declaradores(int i) {
+        List<String> nombres = new ArrayList<>();
+        for (int j = i; j < tokens.size() && !esSimbolo(j, ";"); j++) {
+            if (esIdentificador(j)) nombres.add(tokens.get(j).lexema());
+        }
+        return nombres;
+    }
+
+    /** Los miembros puntero a función entre las llaves de un struct. */
+    private Map<String, Firma> miembrosDe(int desde, int hasta) {
+        Map<String, Firma> miembros = new HashMap<>();
         int i = desde;
         while (i < hasta) {
-            if (esEtiquetaDeAcceso(i)) {
-                i += 2;
-                continue;
-            }
             int fin = finDeMiembro(i, hasta);
-            Metodo metodo = comoMetodo(clase, i, fin);
-            if (metodo != null) metodos.add(metodo);
+            // Forma de un puntero a función: tipo ( * nombre ) ( parámetros ) ;
+            for (int k = i; k + 4 < fin; k++) {
+                if (esSimbolo(k, "{")) break; // struct anidado: sus miembros son de otro struct
+                if (esSimbolo(k, "(") && esOperador(k + 1, "*") && esIdentificador(k + 2)
+                        && esSimbolo(k + 3, ")") && esSimbolo(k + 4, "(")) {
+                    int cierre = cerrar(k + 4, "(", ")");
+                    miembros.put(tokens.get(k + 2).lexema(), crearFirma(k + 5, cierre));
+                    break;
+                }
+            }
             i = fin;
         }
-        return metodos;
+        return miembros;
     }
 
-    private boolean esEtiquetaDeAcceso(int i) {
-        if (i >= tokens.size() || tokens.get(i).tipo() != TipoToken.IDENTIFICADOR) return false;
-        String lexema = tokens.get(i).lexema();
-        return (lexema.equals("public") || lexema.equals("private") || lexema.equals("protected"))
-                && esOperador(i + 1, ":");
-    }
-
-        private int finDeMiembro(int i, int hasta) {
-        boolean inicializador = false;
-        int parentesis = 0;
-        int j = i;
-        while (j < hasta) {
-            if (esSimbolo(j, "(")) {
-                parentesis++;
-            } else if (esSimbolo(j, ")")) {
-                parentesis--;
-            } else if (esOperador(j, "=") && parentesis == 0) {
-                inicializador = true;
-            } else if (esSimbolo(j, ";") && parentesis <= 0) {
-                return j + 1;
-            } else if (esSimbolo(j, "{") && parentesis <= 0) {
-                int cierre = cerrarLlave(j);
-                if (!inicializador) {
-                    int siguiente = cierre + 1;
-                    if (esSimbolo(siguiente, ";")) siguiente++;
-                    return Math.min(siguiente, hasta);
-                }
-                j = cierre;
-            }
-            j++;
+    /** Devuelve la posición siguiente al ";" que cierra el miembro que empieza en i. */
+    private int finDeMiembro(int i, int hasta) {
+        for (int j = i; j < hasta; j++) {
+            if (esSimbolo(j, "{")) j = cerrar(j, "{", "}");
+            else if (esSimbolo(j, ";")) return j + 1;
         }
         return hasta;
     }
 
-        private Metodo comoMetodo(String clase, int desde, int hasta) {
-        for (int j = desde; j < hasta; j++) {
-            if (esOperador(j, "=")) return null;
-            if (!esSimbolo(j, "(")) continue;
-
-            if (j == desde || tokens.get(j - 1).tipo() != TipoToken.IDENTIFICADOR) return null;
-            if (esOperador(j + 1, "*")) return null;
-
-            String nombre = tokens.get(j - 1).lexema();
-            if (nombre.equals(clase)) return null;
-
-            int cierre = cerrarParentesis(j);
-            if (cierre >= hasta) return null;
-            return crearMetodo(nombre, j + 1, cierre);
-        }
-        return null;
-    }
-
-    private Metodo crearMetodo(String nombre, int desde, int hasta) {
-        List<Parametro> parametros = new ArrayList<>();
+    private Firma crearFirma(int desde, int hasta) {
+        List<TipoParametro> parametros = new ArrayList<>();
         boolean variable = false;
         for (List<Token> parametro : separarPorComas(desde, hasta)) {
-            if (parametro.size() == 1 && parametro.get(0).lexema().equals("...")) {
+            if (parametro.size() == 1 && parametro.getFirst().lexema().equals("...")) {
                 variable = true;
-            } else if (parametro.size() == 1 && parametro.get(0).lexema().equals("void")) {
-                continue;
-            } else {
-                parametros.add(crearParametro(parametro));
+            } else if (!(parametro.size() == 1 && parametro.getFirst().lexema().equals("void"))) {
+                parametros.add(tipoDeParametro(parametro));
             }
         }
-        return new Metodo(nombre, parametros, variable);
+        return new Firma(parametros, variable);
     }
 
-    private Parametro crearParametro(List<Token> parametro) {
-        boolean tieneDefecto = false;
+    private TipoParametro tipoDeParametro(List<Token> parametro) {
         boolean puntero = false;
         Set<String> palabras = new LinkedHashSet<>();
-
         for (Token token : parametro) {
-            if (token.tipo() == TipoToken.OPERADOR && token.lexema().equals("=")) {
-                tieneDefecto = true;
-                break;
-            }
             if (token.tipo() == TipoToken.OPERADOR && token.lexema().equals("*")) puntero = true;
             if (token.tipo() == TipoToken.SIMBOLO && token.lexema().equals("[")) puntero = true;
             if (token.tipo() == TipoToken.PALABRA_RESERVADA || token.tipo() == TipoToken.IDENTIFICADOR) {
@@ -178,89 +172,140 @@ public class ErrorLlamadaMetodo {
             }
         }
 
-        TipoParametro tipo;
-        if (palabras.contains("string")) {
-            tipo = TipoParametro.TEXTO;
-        } else if (puntero) {
-            tipo = palabras.contains("char") ? TipoParametro.TEXTO : TipoParametro.PUNTERO;
-        } else if (palabras.contains("float") || palabras.contains("double")) {
-            tipo = TipoParametro.REAL;
-        } else if (palabras.stream().anyMatch(p -> Set.of("int", "short", "long", "char", "unsigned",
-                "signed", "_Bool", "bool", "size_t").contains(p))) {
-            tipo = TipoParametro.ENTERO;
-        } else {
-            tipo = TipoParametro.DESCONOCIDO;
+        if (puntero) {
+            return palabras.contains("char") ? TipoParametro.TEXTO : TipoParametro.PUNTERO;
         }
-        return new Parametro(tipo, tieneDefecto);
+        if (palabras.contains("struct") || palabras.contains("union")) {
+            return TipoParametro.DESCONOCIDO;
+        }
+        if (palabras.contains("float") || palabras.contains("double")) {
+            return TipoParametro.REAL;
+        }
+        if (palabras.stream().anyMatch(TIPOS_ENTEROS::contains)) {
+            return TipoParametro.ENTERO;
+        }
+        return TipoParametro.DESCONOCIDO;
     }
+
+    // ---------------------------------------------------------------- variables y llamadas
 
     private void revisarLlamadas() {
+        alcances = new ArrayList<>();
+        alcances.add(new HashMap<>());
+        pendientes = new HashMap<>();
+        int parentesis = 0;
+
         for (int i = 0; i < tokens.size(); i++) {
-            registrarObjeto(i);
-            if (esLlamada(i)) revisarLlamada(i);
+            if (esSimbolo(i, "(")) {
+                parentesis++;
+            } else if (esSimbolo(i, ")")) {
+                parentesis--;
+            } else if (esSimbolo(i, "{")) {
+                alcances.add(new HashMap<>(pendientes));
+                pendientes.clear();
+            } else if (esSimbolo(i, "}")) {
+                if (alcances.size() > 1) alcances.removeLast();
+            } else if (esSimbolo(i, ";") && parentesis <= 0) {
+                pendientes.clear(); // eran los parámetros de un prototipo, sin cuerpo
+            }
+
+            registrarVariables(i, parentesis > 0);
+            revisarLlamada(i);
         }
     }
 
-        private void registrarObjeto(int i) {
-        Token tipo = tokens.get(i);
-        if (tipo.tipo() != TipoToken.IDENTIFICADOR || !clases.containsKey(tipo.lexema())) return;
-        if (i > 0 && (esOperador(i - 1, ".") || esOperador(i - 1, "->"))) return;
+    /**
+     * Si en i empieza una declaración de variables de un struct conocido ("struct Nombre a, *b"
+     * o "Alias a"), las registra en el alcance actual, o en pendientes si está entre paréntesis.
+     */
+    private void registrarVariables(int i, boolean entreParentesis) {
+        String tipo;
+        int j;
+        if (esPalabra(i, "struct") && esIdentificador(i + 1)
+                && structs.containsKey(tokens.get(i + 1).lexema()) && !esSimbolo(i + 2, "{")) {
+            tipo = "struct " + tokens.get(i + 1).lexema();
+            j = i + 2;
+        } else if (esIdentificador(i) && structs.containsKey(tokens.get(i).lexema())
+                && !esPalabra(i - 1, "struct") && !esAcceso(i - 1)) {
+            tipo = tokens.get(i).lexema();
+            j = i + 1;
+        } else {
+            return;
+        }
+
+        Map<String, String> destino = entreParentesis ? pendientes : alcances.getLast();
+        while (true) {
+            while (esOperador(j, "*")) j++;
+            if (!esIdentificador(j) || esSimbolo(j + 1, "(")) return; // no es variable, o es función
+            destino.put(tokens.get(j).lexema(), tipo);
+
+            // Entre paréntesis cada parámetro trae su propio tipo: no hay más declaradores.
+            if (entreParentesis) return;
+            j = siguienteDeclarador(j + 1);
+            if (j < 0) return;
+        }
+    }
+
+    /** Salta arreglos e inicializadores; si sigue una ",", devuelve la posición siguiente. */
+    private int siguienteDeclarador(int i) {
+        int nivel = 0;
+        for (int j = i; j < tokens.size(); j++) {
+            if (esSimbolo(j, "(") || esSimbolo(j, "[") || esSimbolo(j, "{")) nivel++;
+            else if (esSimbolo(j, ")") || esSimbolo(j, "]") || esSimbolo(j, "}")) nivel--;
+            else if (nivel == 0 && esSimbolo(j, ",")) return j + 1;
+            else if (nivel <= 0 && esSimbolo(j, ";")) return -1;
+            if (nivel < 0) return -1;
+        }
+        return -1;
+    }
+
+    /** Revisa la llamada variable.miembro(...) o variable->miembro(...) que empiece en i. */
+    private void revisarLlamada(int i) {
+        if (!esIdentificador(i) || esAcceso(i - 1)) return;
+        String tipo = tipoDeVariable(tokens.get(i).lexema());
+        if (tipo == null) return;
 
         int j = i + 1;
-        while (esOperador(j, "*") || esOperador(j, "&")) j++;
-        if (j >= tokens.size() || tokens.get(j).tipo() != TipoToken.IDENTIFICADOR) return;
+        while (esSimbolo(j, "[")) j = cerrar(j, "[", "]") + 1; // arreglo de structs: ops[0].f()
+        if (!esAcceso(j) || !esIdentificador(j + 1) || !esSimbolo(j + 2, "(")) return;
 
-        boolean esDeclaracion = esSimbolo(j + 1, ";") || esSimbolo(j + 1, ",") || esSimbolo(j + 1, "(")
-                || esSimbolo(j + 1, "[") || esSimbolo(j + 1, ")") || esOperador(j + 1, "=");
-        if (esDeclaracion) {
-            objetos.put(tokens.get(j).lexema(), tipo.lexema());
+        Token metodo = tokens.get(j + 1);
+        Firma firma = structs.get(tipo.replaceFirst("^struct ", "")).get(metodo.lexema());
+        if (firma == null) return; // no existe o no es puntero a función: no es este error
+
+        int cierre = cerrar(j + 2, "(", ")");
+        List<List<Token>> argumentos = separarPorComas(j + 3, cierre);
+
+        if (!firma.aceptaCantidad(argumentos.size())) {
+            reportar(metodo, "El método " + metodo.lexema() + " de " + tipo + " espera "
+                    + firma.esperados() + " argumento(s) y se llamó con " + argumentos.size());
+            return;
+        }
+        for (int k = 0; k < firma.parametros().size(); k++) {
+            if (!esCompatible(firma.parametros().get(k), argumentos.get(k))) {
+                reportar(metodo, "El argumento " + (k + 1) + " de " + metodo.lexema()
+                        + " no coincide con el tipo del parámetro declarado en " + tipo);
+                return;
+            }
         }
     }
 
-        private boolean esLlamada(int i) {
-        Token objeto = tokens.get(i);
-        if (objeto.tipo() != TipoToken.IDENTIFICADOR || !objetos.containsKey(objeto.lexema())) return false;
-        if (i > 0 && (esOperador(i - 1, ".") || esOperador(i - 1, "->"))) return false;
-        return (esOperador(i + 1, ".") || esOperador(i + 1, "->"))
-                && i + 2 < tokens.size() && tokens.get(i + 2).tipo() == TipoToken.IDENTIFICADOR
-                && esSimbolo(i + 3, "(");
+    private String tipoDeVariable(String nombre) {
+        for (int k = alcances.size() - 1; k >= 0; k--) {
+            String tipo = alcances.get(k).get(nombre);
+            if (tipo != null) return tipo;
+        }
+        return null;
     }
 
-    private void revisarLlamada(int i) {
-        String clase = objetos.get(tokens.get(i).lexema());
-        Token metodo = tokens.get(i + 2);
-
-        List<Metodo> candidatos = clases.get(clase).stream()
-                .filter(m -> m.nombre().equals(metodo.lexema()))
-                .toList();
-        if (candidatos.isEmpty()) return;
-
-        int cierre = cerrarParentesis(i + 3);
-        if (cierre >= tokens.size()) return;
-
-        List<List<Token>> argumentos = separarPorComas(i + 4, cierre);
-        for (Metodo candidato : candidatos) {
-            if (aceptaArgumentos(candidato, argumentos)) return;
-        }
-
-        errores.add(new ErrorSemantico(
-                "Llamada incorrecta a un método",
-                descripcion(clase, metodo, candidatos, argumentos.size()),
+    private void reportar(Token metodo, String descripcion) {
+        errores.add(new ErrorSemantico("Llamada incorrecta a un método", descripcion,
                 metodo.linea(), metodo.inicio(), metodo.fin()));
     }
 
-    private boolean aceptaArgumentos(Metodo metodo, List<List<Token>> argumentos) {
-        if (!metodo.aceptaCantidad(argumentos.size())) return false;
-        for (int k = 0; k < argumentos.size(); k++) {
-            TipoParametro tipo = k < metodo.parametros().size()
-                    ? metodo.parametros().get(k).tipo()
-                    : TipoParametro.DESCONOCIDO;
-            if (!esCompatible(tipo, argumentos.get(k))) return false;
-        }
-        return true;
-    }
+    // ---------------------------------------------------------------- tipos de los argumentos
 
-        private boolean esCompatible(TipoParametro tipo, List<Token> argumento) {
+    private boolean esCompatible(TipoParametro tipo, List<Token> argumento) {
         TipoToken literal = tipoDeLiteral(argumento);
         if (literal == null) return true;
 
@@ -272,47 +317,30 @@ public class ErrorLlamadaMetodo {
         };
     }
 
+    /** Si el argumento es un literal (con signo opcional), su tipo; si no, null. */
     private TipoToken tipoDeLiteral(List<Token> argumento) {
         List<Token> partes = argumento;
-        if (partes.size() == 2 && partes.get(0).tipo() == TipoToken.OPERADOR
-                && (partes.get(0).lexema().equals("-") || partes.get(0).lexema().equals("+"))) {
+        if (partes.size() == 2 && partes.getFirst().tipo() == TipoToken.OPERADOR
+                && (partes.getFirst().lexema().equals("-") || partes.getFirst().lexema().equals("+"))) {
             partes = partes.subList(1, 2);
         }
         if (partes.size() != 1) return null;
 
-        TipoToken tipo = partes.get(0).tipo();
+        TipoToken tipo = partes.getFirst().tipo();
         boolean esLiteral = tipo == TipoToken.CONSTANTE_ENTERA || tipo == TipoToken.CONSTANTE_REAL
                 || tipo == TipoToken.CONSTANTE_CARACTER || tipo == TipoToken.CADENA;
         return esLiteral ? tipo : null;
     }
 
     private boolean esCero(List<Token> argumento) {
-        return argumento.size() == 1 && argumento.get(0).tipo() == TipoToken.CONSTANTE_ENTERA
-                && argumento.get(0).lexema().equals("0");
+        return argumento.size() == 1 && argumento.getFirst().tipo() == TipoToken.CONSTANTE_ENTERA
+                && argumento.getFirst().lexema().equals("0");
     }
 
-    private String descripcion(String clase, Token metodo, List<Metodo> candidatos, int recibidos) {
-        boolean cantidadCorrecta = candidatos.stream().anyMatch(m -> m.aceptaCantidad(recibidos));
-        if (cantidadCorrecta) {
-            return "Algún argumento de " + metodo.lexema() + " no coincide con el tipo del parámetro en la clase "
-                    + clase;
-        }
+    // ---------------------------------------------------------------- utilidades
 
-        Set<String> esperados = new LinkedHashSet<>();
-        for (Metodo m : candidatos) {
-            if (m.variable()) {
-                esperados.add("al menos " + m.minimo());
-            } else if (m.minimo() == m.maximo()) {
-                esperados.add(String.valueOf(m.minimo()));
-            } else {
-                esperados.add("de " + m.minimo() + " a " + m.maximo());
-            }
-        }
-        return "El método " + metodo.lexema() + " de la clase " + clase + " espera "
-                + String.join(" o ", esperados) + " argumento(s) y se llamó con " + recibidos;
-    }
-
-        private List<List<Token>> separarPorComas(int desde, int hasta) {
+    /** Separa los tokens entre desde y hasta por las comas que no están dentro de (), [] o {}. */
+    private List<List<Token>> separarPorComas(int desde, int hasta) {
         List<List<Token>> partes = new ArrayList<>();
         if (desde >= hasta) return partes;
 
@@ -340,24 +368,27 @@ public class ErrorLlamadaMetodo {
         return partes;
     }
 
-        private int cerrarParentesis(int i) {
+    /** Devuelve la posición del símbolo que cierra al que abre en i. */
+    private int cerrar(int i, String abre, String cierra) {
         int nivel = 0;
         for (int j = i; j < tokens.size(); j++) {
-            if (esSimbolo(j, "(")) nivel++;
-            if (esSimbolo(j, ")")) nivel--;
+            if (esSimbolo(j, abre)) nivel++;
+            if (esSimbolo(j, cierra)) nivel--;
             if (nivel == 0) return j;
         }
         return tokens.size();
     }
 
-        private int cerrarLlave(int i) {
-        int nivel = 0;
-        for (int j = i; j < tokens.size(); j++) {
-            if (esSimbolo(j, "{")) nivel++;
-            if (esSimbolo(j, "}")) nivel--;
-            if (nivel == 0) return j;
-        }
-        return tokens.size();
+    private boolean esAcceso(int i) {
+        return esOperador(i, ".") || esOperador(i, "->");
+    }
+
+    private boolean esIdentificador(int i) {
+        return i >= 0 && i < tokens.size() && tokens.get(i).tipo() == TipoToken.IDENTIFICADOR;
+    }
+
+    private boolean esPalabra(int i, String lexema) {
+        return es(i, TipoToken.PALABRA_RESERVADA, lexema);
     }
 
     private boolean esSimbolo(int i, String lexema) {
