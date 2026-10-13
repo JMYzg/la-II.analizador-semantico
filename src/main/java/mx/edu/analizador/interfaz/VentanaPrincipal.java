@@ -3,8 +3,6 @@ package mx.edu.analizador.interfaz;
 import mx.edu.analizador.LectorC;
 import mx.edu.analizador.lexico.Lexer;
 import mx.edu.analizador.lexico.Token;
-//9999999999999999999999999999999999
-import mx.edu.analizador.semantico.ErrorContinue;
 import mx.edu.analizador.semantico.ErrorSemantico;
 
 import javax.swing.*;
@@ -47,7 +45,6 @@ public class VentanaPrincipal extends JFrame {
     private final DefaultTableModel modelo;
     private final JTextArea areaCodigo;
     private final JLabel etiquetaArchivo;
-    //99999999999999999999999999para los errores
     private final DefaultTableModel modeloErrores;
 
     public VentanaPrincipal() {
@@ -106,9 +103,7 @@ public class VentanaPrincipal extends JFrame {
         divisor.setResizeWeight(0.5);
         add(divisor, BorderLayout.CENTER);
 
-        //999999999999999999999999999999999999999999999 Errores semánticos encontrados en el archivo
-
-        // tabla de errores semanticos
+        // Tabla de errores semánticos encontrados en el archivo, debajo de las otras dos
         String[] columnasErrores = {"Error", "Descripción", "Línea", "Inicio", "Fin"};
         modeloErrores = new DefaultTableModel(columnasErrores, 0) {
             @Override
@@ -129,8 +124,6 @@ public class VentanaPrincipal extends JFrame {
         panelErrores.setPreferredSize(new Dimension(0, 140));
         panelErrores.setBorder(BorderFactory.createTitledBorder("Errores semánticos"));
         add(panelErrores, BorderLayout.SOUTH);
-
-        ///////////////999999999999
     }
 
     private void elegirArchivo() {
@@ -147,10 +140,10 @@ public class VentanaPrincipal extends JFrame {
         }
     }
 
-    // Lee el archivo, muestra su código y llena la tabla con sus tokens
+    // Lee el archivo, muestra su código, llena la tabla con sus tokens y la de errores semánticos
     private void mostrarArchivo(File archivo) {
         modelo.setRowCount(0);
-        areaCodigo.setText(""); //9999999999999999999999999999999
+        areaCodigo.setText("");
         modeloErrores.setRowCount(0);
         etiquetaArchivo.setText(archivo.getName());
 
@@ -170,20 +163,15 @@ public class VentanaPrincipal extends JFrame {
                 });
             }
 
-            // Error 99999999999999999999999999999999
-            // Error 9 - Uso incorrecto de continue
-            List<ErrorSemantico> errores = new ErrorContinue().analizar(tokens);
-            for (int i = 0; i < errores.size(); i++) {
-                ErrorSemantico error = errores.get(i);
+            for (ErrorSemantico error : ErrorSemantico.buscarErrores(tokens)) {
                 modeloErrores.addRow(new Object[]{
-                        error.getNombre(),
-                        error.getDescripcion(),
-                        error.getLinea(),
-                        error.getInicio(),
-                        error.getFin()
+                        error.nombre(),
+                        error.descripcion(),
+                        error.linea(),
+                        error.inicio(),
+                        error.fin()
                 });
-
-            }///////////////////////////
+            }
         } catch (IOException e) {
             JOptionPane.showMessageDialog(this, "Error al leer el archivo: " + e.getMessage(),
                     "Error", JOptionPane.ERROR_MESSAGE);
