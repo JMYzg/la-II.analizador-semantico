@@ -1,9 +1,9 @@
 package mx.edu.analizador.semantico;
 
-import mx.edu.analizador.lexico.Token;
-
 import java.util.ArrayList;
 import java.util.List;
+
+import mx.edu.analizador.lexico.Token;
 
 /**
  * Un error semántico encontrado en el código: es una fila de la tabla de errores de la interfaz.
@@ -17,7 +17,8 @@ public record ErrorSemantico(String nombre, String descripcion, int linea, int i
      */
     public static List<ErrorSemantico> buscarErrores(List<Token> tokens) {
         List<ErrorSemantico> errores = new ArrayList<>();
-        errores.addAll(new ErrorContinue().analizar(tokens)); // 9 - Uso incorrecto de continue
+        errores.addAll(new ErrorContinue().analizar(tokens)); 
+              errores.addAll(new ErrorLlamadaMetodo().analizar(tokens));  
         return errores;
     }
 }
