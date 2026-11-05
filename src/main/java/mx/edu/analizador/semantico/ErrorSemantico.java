@@ -15,10 +15,13 @@ public record ErrorSemantico(String nombre, String descripcion, int linea, int i
      * Busca todos los errores semánticos en los tokens. Cada error del catálogo tiene su
      * propia clase; al implementar uno nuevo, agrégalo aquí.
      */
+
+    
     public static List<ErrorSemantico> buscarErrores(List<Token> tokens) {
         List<ErrorSemantico> errores = new ArrayList<>();
         errores.addAll(new ErrorContinue().analizar(tokens));      // 9 - Uso incorrecto de continue
         errores.addAll(new ErrorLlamadaMetodo().analizar(tokens)); // 13 - Llamada incorrecta a un método
+         errores.addAll(new ErrorArgumentosFuncion().analizar(tokens)); 
         return errores;
     }
 }
