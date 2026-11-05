@@ -10,28 +10,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Error 13: llamada incorrecta a un método. C no tiene clases; lo que hace el papel de un
- * método es un miembro de un struct que es puntero a función, por ejemplo
- * "struct Calculadora { int (*sumar)(int, int); };", que se llama con calc.sumar(1, 2)
- * o con p->sumar(1, 2).
- *
- * Primero busca los structs ("struct Nombre { ... }", "typedef struct { ... } Alias" y
- * "typedef struct Nombre Alias;") y la firma de cada miembro puntero a función. Después
- * revisa cada llamada variable.miembro(...) o variable->miembro(...) sobre una variable de
- * esos structs que esté al alcance, y reporta un error si:
- * - la cantidad de argumentos no es la de parámetros (con "..." acepta más), o
- * - un argumento literal no es compatible con su parámetro: una cadena donde se espera un
- *   número, o un número donde se espera un puntero (salvo 0, el puntero nulo).
- *
- * Solo compara el tipo de los literales: si el argumento es una variable o una expresión
- * no conoce su tipo y lo da por bueno. Llamar a un miembro que no existe es el error 12.
- */
 public class ErrorLlamadaMetodo {
 
     private enum TipoParametro { ENTERO, REAL, TEXTO, PUNTERO, DESCONOCIDO }
 
-    /** Los parámetros de un puntero a función; variable indica que termina en "...". */
     private record Firma(List<TipoParametro> parametros, boolean variable) {
         boolean aceptaCantidad(int cantidad) {
             return variable ? cantidad >= parametros.size() : cantidad == parametros.size();
@@ -48,15 +30,10 @@ public class ErrorLlamadaMetodo {
     private List<Token> tokens;
     private List<ErrorSemantico> errores;
 
-    // Nombre del struct o de su typedef -> sus miembros puntero a función, por nombre.
     private Map<String, Map<String, Firma>> structs;
 
-    // Variables al alcance: nombre -> tipo como se escribió ("struct Calculadora" o "Consola").
-    // Hay un mapa por cada bloque { } abierto; el último es el más interno.
     private List<Map<String, String>> alcances;
 
-    // Variables declaradas entre paréntesis (parámetros de una función o el encabezado de un
-    // for): pasan al bloque que se abre justo después.
     private Map<String, String> pendientes;
 
     public List<ErrorSemantico> analizar(List<Token> tokens) {
@@ -70,8 +47,6 @@ public class ErrorLlamadaMetodo {
         }
         return errores;
     }
-
-    // ---------------------------------------------------------------- structs y sus firmas
 
     private void buscarStructs() {
         Map<String, String> alias = new HashMap<>();
@@ -97,7 +72,6 @@ public class ErrorLlamadaMetodo {
                     }
                 }
             } else if (conTypedef && nombre != null) {
-                // typedef struct Nombre Alias; (el struct puede estar definido antes o después)
                 for (String nombreAlias : declaradores(j)) {
                     alias.put(nombreAlias, nombre);
                 }
@@ -109,7 +83,6 @@ public class ErrorLlamadaMetodo {
         });
     }
 
-    /** Los nombres declarados desde i hasta el ";", como Alias y PAlias en "} Alias, *PAlias;". */
     private List<String> declaradores(int i) {
         List<String> nombres = new ArrayList<>();
         for (int j = i; j < tokens.size() && !esSimbolo(j, ";"); j++) {
@@ -118,15 +91,13 @@ public class ErrorLlamadaMetodo {
         return nombres;
     }
 
-    /** Los miembros puntero a función entre las llaves de un struct. */
     private Map<String, Firma> miembrosDe(int desde, int hasta) {
         Map<String, Firma> miembros = new HashMap<>();
         int i = desde;
         while (i < hasta) {
             int fin = finDeMiembro(i, hasta);
-            // Forma de un puntero a función: tipo ( * nombre ) ( parámetros ) ;
             for (int k = i; k + 4 < fin; k++) {
-                if (esSimbolo(k, "{")) break; // struct anidado: sus miembros son de otro struct
+                if (esSimbolo(k, "{")) break;
                 if (esSimbolo(k, "(") && esOperador(k + 1, "*") && esIdentificador(k + 2)
                         && esSimbolo(k + 3, ")") && esSimbolo(k + 4, "(")) {
                     int cierre = cerrar(k + 4, "(", ")");
@@ -139,7 +110,6 @@ public class ErrorLlamadaMetodo {
         return miembros;
     }
 
-    /** Devuelve la posición siguiente al ";" que cierra el miembro que empieza en i. */
     private int finDeMiembro(int i, int hasta) {
         for (int j = i; j < hasta; j++) {
             if (esSimbolo(j, "{")) j = cerrar(j, "{", "}");
@@ -187,8 +157,6 @@ public class ErrorLlamadaMetodo {
         return TipoParametro.DESCONOCIDO;
     }
 
-    // ---------------------------------------------------------------- variables y llamadas
-
     private void revisarLlamadas() {
         alcances = new ArrayList<>();
         alcances.add(new HashMap<>());
@@ -206,7 +174,7 @@ public class ErrorLlamadaMetodo {
             } else if (esSimbolo(i, "}")) {
                 if (alcances.size() > 1) alcances.removeLast();
             } else if (esSimbolo(i, ";") && parentesis <= 0) {
-                pendientes.clear(); // eran los parámetros de un prototipo, sin cuerpo
+                pendientes.clear();
             }
 
             registrarVariables(i, parentesis > 0);
@@ -214,10 +182,6 @@ public class ErrorLlamadaMetodo {
         }
     }
 
-    /**
-     * Si en i empieza una declaración de variables de un struct conocido ("struct Nombre a, *b"
-     * o "Alias a"), las registra en el alcance actual, o en pendientes si está entre paréntesis.
-     */
     private void registrarVariables(int i, boolean entreParentesis) {
         String tipo;
         int j;
@@ -236,17 +200,15 @@ public class ErrorLlamadaMetodo {
         Map<String, String> destino = entreParentesis ? pendientes : alcances.getLast();
         while (true) {
             while (esOperador(j, "*")) j++;
-            if (!esIdentificador(j) || esSimbolo(j + 1, "(")) return; // no es variable, o es función
+            if (!esIdentificador(j) || esSimbolo(j + 1, "(")) return;
             destino.put(tokens.get(j).lexema(), tipo);
 
-            // Entre paréntesis cada parámetro trae su propio tipo: no hay más declaradores.
             if (entreParentesis) return;
             j = siguienteDeclarador(j + 1);
             if (j < 0) return;
         }
     }
 
-    /** Salta arreglos e inicializadores; si sigue una ",", devuelve la posición siguiente. */
     private int siguienteDeclarador(int i) {
         int nivel = 0;
         for (int j = i; j < tokens.size(); j++) {
@@ -259,19 +221,18 @@ public class ErrorLlamadaMetodo {
         return -1;
     }
 
-    /** Revisa la llamada variable.miembro(...) o variable->miembro(...) que empiece en i. */
     private void revisarLlamada(int i) {
         if (!esIdentificador(i) || esAcceso(i - 1)) return;
         String tipo = tipoDeVariable(tokens.get(i).lexema());
         if (tipo == null) return;
 
         int j = i + 1;
-        while (esSimbolo(j, "[")) j = cerrar(j, "[", "]") + 1; // arreglo de structs: ops[0].f()
+        while (esSimbolo(j, "[")) j = cerrar(j, "[", "]") + 1;
         if (!esAcceso(j) || !esIdentificador(j + 1) || !esSimbolo(j + 2, "(")) return;
 
         Token metodo = tokens.get(j + 1);
         Firma firma = structs.get(tipo.replaceFirst("^struct ", "")).get(metodo.lexema());
-        if (firma == null) return; // no existe o no es puntero a función: no es este error
+        if (firma == null) return;
 
         int cierre = cerrar(j + 2, "(", ")");
         List<List<Token>> argumentos = separarPorComas(j + 3, cierre);
@@ -303,8 +264,6 @@ public class ErrorLlamadaMetodo {
                 metodo.linea(), metodo.inicio(), metodo.fin()));
     }
 
-    // ---------------------------------------------------------------- tipos de los argumentos
-
     private boolean esCompatible(TipoParametro tipo, List<Token> argumento) {
         TipoToken literal = tipoDeLiteral(argumento);
         if (literal == null) return true;
@@ -317,7 +276,6 @@ public class ErrorLlamadaMetodo {
         };
     }
 
-    /** Si el argumento es un literal (con signo opcional), su tipo; si no, null. */
     private TipoToken tipoDeLiteral(List<Token> argumento) {
         List<Token> partes = argumento;
         if (partes.size() == 2 && partes.getFirst().tipo() == TipoToken.OPERADOR
@@ -337,9 +295,6 @@ public class ErrorLlamadaMetodo {
                 && argumento.getFirst().lexema().equals("0");
     }
 
-    // ---------------------------------------------------------------- utilidades
-
-    /** Separa los tokens entre desde y hasta por las comas que no están dentro de (), [] o {}. */
     private List<List<Token>> separarPorComas(int desde, int hasta) {
         List<List<Token>> partes = new ArrayList<>();
         if (desde >= hasta) return partes;
@@ -368,7 +323,6 @@ public class ErrorLlamadaMetodo {
         return partes;
     }
 
-    /** Devuelve la posición del símbolo que cierra al que abre en i. */
     private int cerrar(int i, String abre, String cierra) {
         int nivel = 0;
         for (int j = i; j < tokens.size(); j++) {
