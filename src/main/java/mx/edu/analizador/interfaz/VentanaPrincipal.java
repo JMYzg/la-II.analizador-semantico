@@ -19,7 +19,8 @@ import java.util.List;
  */
 public class VentanaPrincipal extends JFrame {
 
-    // Casos de errores semánticos. Por ahora solo se muestran: su análisis es otro entregable.
+    // Casos de errores semánticos. Por ahora solo se muestran: su análisis es otro
+    // entregable.
     private static final String[] ERRORES_SEMANTICOS = {
             "1 - Variable no declarada",
             "2 - Variable fuera de alcance (scope)",
@@ -46,6 +47,7 @@ public class VentanaPrincipal extends JFrame {
     private final JTextArea areaCodigo;
     private final JLabel etiquetaArchivo;
     private final DefaultTableModel modeloErrores;
+    private final JTextArea areaNumeros;
 
     public VentanaPrincipal() {
         setTitle("Analizador Léxico - Tabla de Símbolos");
@@ -71,7 +73,7 @@ public class VentanaPrincipal extends JFrame {
         add(panelSuperior, BorderLayout.NORTH);
 
         // Tabla de símbolos
-        String[] columnas = {"Lexema", "Tipo", "Línea", "Inicio", "Fin"};
+        String[] columnas = { "Lexema", "Tipo", "Línea", "Inicio", "Fin" };
         modelo = new DefaultTableModel(columnas, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
@@ -89,22 +91,39 @@ public class VentanaPrincipal extends JFrame {
         tabla.getColumnModel().getColumn(4).setPreferredWidth(60);
 
         // Área donde se muestra el código C
+        // Área donde se muestra el código C.
         areaCodigo = new JTextArea();
         areaCodigo.setEditable(false);
         areaCodigo.setFont(new Font("Monospaced", Font.PLAIN, 13));
+        areaCodigo.setLineWrap(false);
+        areaCodigo.setMargin(new Insets(4, 6, 4, 6));
 
-        // Tabla a la izquierda y código a la derecha
+        // Margen donde se muestran los números de línea.
+        areaNumeros = new JTextArea();
+        areaNumeros.setEditable(false);
+        areaNumeros.setFocusable(false);
+        areaNumeros.setFont(areaCodigo.getFont());
+        areaNumeros.setBackground(new Color(240, 240, 240));
+        areaNumeros.setForeground(Color.GRAY);
+        areaNumeros.setMargin(new Insets(4, 6, 4, 6));
+
+        // El código y sus números comparten el desplazamiento vertical.
+        JScrollPane panelCodigo = new JScrollPane(areaCodigo);
+        panelCodigo.setRowHeaderView(areaNumeros);
+
+        // Tabla a la izquierda y código a la derecha.
         JSplitPane divisor = new JSplitPane(
                 JSplitPane.HORIZONTAL_SPLIT,
                 new JScrollPane(tabla),
-                new JScrollPane(areaCodigo)
-        );
+                panelCodigo);
+
         divisor.setDividerLocation(550);
         divisor.setResizeWeight(0.5);
         add(divisor, BorderLayout.CENTER);
 
-        // Tabla de errores semánticos encontrados en el archivo, debajo de las otras dos
-        String[] columnasErrores = {"Error", "Descripción", "Línea", "Inicio", "Fin"};
+        // Tabla de errores semánticos encontrados en el archivo, debajo de las otras
+        // dos
+        String[] columnasErrores = { "Error", "Descripción", "Línea", "Inicio", "Fin" };
         modeloErrores = new DefaultTableModel(columnasErrores, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
@@ -140,21 +159,26 @@ public class VentanaPrincipal extends JFrame {
         }
     }
 
-    // Lee el archivo, muestra su código, llena la tabla con sus tokens y la de errores semánticos
+    // Lee el archivo, muestra su código, llena la tabla con sus tokens y la de
+    // errores semánticos
     private void mostrarArchivo(File archivo) {
         modelo.setRowCount(0);
         areaCodigo.setText("");
+        areaNumeros.setText("");
         modeloErrores.setRowCount(0);
         etiquetaArchivo.setText(archivo.getName());
 
         try {
             String codigo = LectorC.leer(archivo.getPath());
+
             areaCodigo.setText(codigo);
+            actualizarNumeros();
+
             areaCodigo.setCaretPosition(0);
 
             List<Token> tokens = new Lexer().analizar(codigo);
             for (Token token : tokens) {
-                modelo.addRow(new Object[]{
+                modelo.addRow(new Object[] {
                         token.lexema(),
                         token.tipo(),
                         token.linea(),
@@ -164,7 +188,7 @@ public class VentanaPrincipal extends JFrame {
             }
 
             for (ErrorSemantico error : ErrorSemantico.buscarErrores(tokens)) {
-                modeloErrores.addRow(new Object[]{
+                modeloErrores.addRow(new Object[] {
                         error.nombre(),
                         error.descripcion(),
                         error.linea(),
@@ -179,5 +203,24 @@ public class VentanaPrincipal extends JFrame {
             JOptionPane.showMessageDialog(this, "Error léxico: " + e.getMessage(),
                     "Error", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void actualizarNumeros() {
+        int cantidad = areaCodigo.getLineCount();
+        int ancho = String.valueOf(cantidad).length();
+
+        StringBuilder numeros = new StringBuilder();
+
+        for (int i = 1; i <= cantidad; i++) {
+            numeros.append(
+                    String.format("%" + ancho + "d", i));
+
+            if (i < cantidad) {
+                numeros.append("\n");
+            }
+        }
+
+        areaNumeros.setText(numeros.toString());
+        areaNumeros.setCaretPosition(0);
     }
 }
